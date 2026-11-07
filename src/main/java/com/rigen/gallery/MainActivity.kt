@@ -158,6 +158,7 @@ fun App() {
     val open: (String, List<Photo>) -> Unit = { t, p -> detail = Detail(t, p); detailOpen = true }
 
     CompositionLocalProvider(LocalBg provides bg, LocalContentColor provides fg) {
+        UpdatePrompt()
         Box(Modifier.fillMaxSize().background(if (tab == 2) DarkBg else bg)) {
             when {
                 photos == null -> Unit
@@ -342,7 +343,7 @@ private fun PhotosTab(
 @Composable
 internal fun PhotoGrid(
     ps: List<Photo>, selected: Set<Uri>, onTap: (Int) -> Unit, onLong: (Int) -> Unit,
-    modifier: Modifier = Modifier, header: (@Composable () -> Unit)? = null, cols: Int = 3,
+    modifier: Modifier = Modifier, cols: Int = 3, header: (@Composable () -> Unit)? = null,
 ) {
     LazyVerticalGrid(
         GridCells.Fixed(cols), modifier,

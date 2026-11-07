@@ -1,0 +1,2 @@
+- Trash, storage report, memories, photo editor, small share, slideshow
+- In-app updates
