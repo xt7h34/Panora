@@ -4,6 +4,8 @@ import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
@@ -24,14 +26,17 @@ data class Photo(val uri: Uri, val millis: Long, val size: Long, val bucket: Str
     val day: LocalDate get() = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
 }
 
-fun loadPhotos(ctx: Context): List<Photo> {
+fun loadPhotos(ctx: Context, trashed: Boolean = false): List<Photo> {
     val base = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
     val out = ArrayList<Photo>()
     val cols = arrayOf(
         MediaStore.Images.Media._ID, MediaStore.Images.Media.DATE_TAKEN, MediaStore.Images.Media.DATE_ADDED,
         MediaStore.Images.Media.SIZE, MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
     )
-    ctx.contentResolver.query(base, cols, null, null, null)?.use { c ->
+    val cur = if (!trashed) ctx.contentResolver.query(base, cols, null, null, null)
+    else if (Build.VERSION.SDK_INT >= 30) ctx.contentResolver.query(base, cols, Bundle().apply { putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY) }, null)
+    else null
+    cur?.use { c ->
         while (c.moveToNext()) {
             val taken = c.getLong(1)
             val millis = if (taken > 0) taken else c.getLong(2) * 1000

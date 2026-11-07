@@ -53,6 +53,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.YearMonth
@@ -97,16 +98,23 @@ fun App() {
     var selecting by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<Uri>()) }
     var favs by remember { mutableStateOf(Favs.load(ctx)) }
+    var trash by remember { mutableStateOf<List<Photo>>(emptyList()) }
+    var storageOpen by remember { mutableStateOf(false) }
+    var trashOpen by remember { mutableStateOf(false) }
+    var editPhoto by remember { mutableStateOf<Photo?>(null) }
     val list = photos ?: emptyList()
 
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         photos = if (ok) loadPhotos(ctx) else emptyList()
+        if (ok) trash = loadPhotos(ctx, true)
     }
     LaunchedEffect(Unit) { ask.launch(perm) }
 
     fun reset() {
         selecting = false; selected = emptySet(); viewerOpen = false; cleanOpen = false; detailOpen = false
         photos = loadPhotos(ctx)
+        trash = loadPhotos(ctx, true)
+        editPhoto = null
     }
     val del = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         if (it.resultCode == Activity.RESULT_OK) reset()
@@ -114,9 +122,17 @@ fun App() {
     fun delete(l: List<Photo>) {
         if (l.isEmpty()) return
         if (Build.VERSION.SDK_INT >= 30) {
-            val pi = MediaStore.createDeleteRequest(ctx.contentResolver, l.map { it.uri })
+            val pi = MediaStore.createTrashRequest(ctx.contentResolver, l.map { it.uri }, true)
             del.launch(IntentSenderRequest.Builder(pi.intentSender).build())
         } else Toast.makeText(ctx, "Delete needs Android 11+", Toast.LENGTH_SHORT).show()
+    }
+    fun restore(l: List<Photo>) {
+        if (l.isNotEmpty() && Build.VERSION.SDK_INT >= 30)
+            del.launch(IntentSenderRequest.Builder(MediaStore.createTrashRequest(ctx.contentResolver, l.map { it.uri }, false).intentSender).build())
+    }
+    fun deleteForever(l: List<Photo>) {
+        if (l.isNotEmpty() && Build.VERSION.SDK_INT >= 30)
+            del.launch(IntentSenderRequest.Builder(MediaStore.createDeleteRequest(ctx.contentResolver, l.map { it.uri }).intentSender).build())
     }
     fun toggleFav(p: Photo) {
         val k = p.uri.toString()
@@ -124,10 +140,13 @@ fun App() {
         Favs.save(ctx, favs)
     }
 
+    BackHandler(storageOpen) { storageOpen = false }
+    BackHandler(trashOpen) { trashOpen = false }
     BackHandler(detailOpen) { detailOpen = false }
     BackHandler(selecting) { selecting = false; selected = emptySet() }
     BackHandler(cleanOpen) { cleanOpen = false }
     BackHandler(viewerOpen) { viewerOpen = false }
+    BackHandler(editPhoto != null) { editPhoto = null }
 
     val onTap: (List<Photo>, Int) -> Unit = { l, i ->
         if (selecting) {
@@ -143,12 +162,18 @@ fun App() {
             when {
                 photos == null -> Unit
                 list.isEmpty() -> Text("No photos / permission denied", Modifier.align(Alignment.Center))
-                tab == 0 -> HomeScreen(list, open) { cleanOpen = true }
+                tab == 0 -> HomeScreen(list, open, { cleanOpen = true }, { storageOpen = true }, { trashOpen = true })
                 tab == 1 -> PhotosTab(list, favs, selected, onTap, onLong)
                 else -> MonthsScreen(list, open)
             }
             if (!selecting) NavPill(tab, sysDark || tab == 2, Modifier.align(Alignment.BottomCenter)) { tab = it }
 
+            AnimatedVisibility(storageOpen, enter = slideInVertically { it } + fadeIn(), exit = slideOutVertically { it } + fadeOut()) {
+                Box(Modifier.fillMaxSize().background(bg)) { StorageScreen(list, { storageOpen = false }, open) }
+            }
+            AnimatedVisibility(trashOpen, enter = slideInVertically { it } + fadeIn(), exit = slideOutVertically { it } + fadeOut()) {
+                Box(Modifier.fillMaxSize().background(bg)) { TrashScreen(trash, { trashOpen = false }, { restore(it) }, { deleteForever(it) }) }
+            }
             AnimatedVisibility(detailOpen, enter = slideInHorizontally { it } + fadeIn(), exit = slideOutHorizontally { it } + fadeOut()) {
                 detail?.let { d ->
                     Box(Modifier.fillMaxSize().background(bg)) {
@@ -165,7 +190,8 @@ fun App() {
                     val chosen = list.filter { it.uri in selected }
                     PillItem("${selected.size} selected", false) {}
                     PillItem("Share", true) { if (chosen.isNotEmpty()) share(ctx, chosen) }
-                    PillItem("Delete", true) { delete(chosen) }
+                    PillItem("Small", true) { if (chosen.isNotEmpty()) shareSmall(ctx, chosen) }
+                    PillItem("Trash", true) { delete(chosen) }
                     PillItem("Cancel", true) { selecting = false; selected = emptySet() }
                 }
             }
@@ -176,10 +202,13 @@ fun App() {
                 }
             }
 
+            AnimatedVisibility(editPhoto != null, enter = slideInVertically { it } + fadeIn(), exit = slideOutVertically { it } + fadeOut()) {
+                editPhoto?.let { ep -> Box(Modifier.fillMaxSize().background(bg)) { EditScreen(ep, { editPhoto = null }) { reset() } } }
+            }
             AnimatedVisibility(viewerOpen, enter = fadeIn() + scaleIn(initialScale = 0.92f), exit = fadeOut() + scaleOut(targetScale = 0.92f)) {
                 viewer?.let { (ps, start) ->
                     key(ps, start) {
-                        Viewer(ps, start, favs, { toggleFav(it) }, { share(ctx, listOf(it)) }, { delete(listOf(it)) }) { viewerOpen = false }
+                        Viewer(ps, start, favs, { toggleFav(it) }, { share(ctx, listOf(it)) }, { shareSmall(ctx, listOf(it)) }, { editPhoto = it; viewerOpen = false }, { delete(listOf(it)) }) { viewerOpen = false }
                     }
                 }
             }
@@ -188,7 +217,7 @@ fun App() {
 }
 
 @Composable
-private fun Header(title: String, trailing: String, action: (@Composable () -> Unit)? = null) {
+internal fun Header(title: String, trailing: String, action: (@Composable () -> Unit)? = null) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, fontSize = 30.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         Text(trailing, color = Color.Gray, fontSize = 16.sp)
@@ -197,7 +226,7 @@ private fun Header(title: String, trailing: String, action: (@Composable () -> U
 }
 
 @Composable
-private fun Chip(label: String, on: Boolean = false, onClick: () -> Unit) {
+internal fun Chip(label: String, on: Boolean = false, onClick: () -> Unit) {
     val fg = LocalContentColor.current
     Text(
         label, fontSize = 14.sp, fontWeight = FontWeight.Medium,
@@ -211,11 +240,20 @@ private fun dateText(d: LocalDate) = buildAnnotatedString {
 }
 
 @Composable
-private fun HomeScreen(all: List<Photo>, open: (String, List<Photo>) -> Unit, onClean: () -> Unit) {
+private fun HomeScreen(all: List<Photo>, open: (String, List<Photo>) -> Unit, onClean: () -> Unit, onStorage: () -> Unit, onTrash: () -> Unit) {
     val days = remember(all) { all.groupBy { it.day }.toList() }
     val top = remember(days) { days.sortedByDescending { it.second.size }.take(6) }
+    val today = remember { LocalDate.now() }
+    val mem = remember(all) {
+        all.filter { it.day.month == today.month && it.day.dayOfMonth == today.dayOfMonth && it.day.year < today.year }
+            .groupBy { it.day.year }.toList().sortedByDescending { it.first }
+    }
     LazyColumn(Modifier.statusBarsPadding(), contentPadding = PaddingValues(bottom = 120.dp)) {
-        item { Header("Home", "${all.size}") { Chip("Clean ✨") { onClean() } } }
+        item {
+            Header("Home", "${all.size}") {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { Chip("✨") { onClean() }; Chip("📊") { onStorage() }; Chip("🗑") { onTrash() } }
+            }
+        }
         item {
             LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(top) { (day, ps) ->
@@ -225,6 +263,21 @@ private fun HomeScreen(all: List<Photo>, open: (String, List<Photo>) -> Unit, on
                         Column(Modifier.align(Alignment.BottomStart).padding(18.dp)) {
                             Text(dateText(day), color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
                             Text("${ps.size} • ${fmtSize(ps.sumOf { it.size })}", color = Color.White.copy(0.85f), fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        }
+        if (mem.isNotEmpty()) {
+            item { Spacer(Modifier.height(24.dp)); Header("On this day", "") }
+            item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(mem) { (y, ps) ->
+                        val label = "${today.year - y} years ago"
+                        Box(Modifier.width(130.dp).height(180.dp).clip(RoundedCornerShape(22.dp)).clickable { open(label, ps) }) {
+                            Thumb(ps.first().uri, 300, Modifier.fillMaxSize())
+                            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xAA000000)), startY = 200f)))
+                            Text(label, Modifier.align(Alignment.BottomStart).padding(12.dp), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -253,6 +306,7 @@ private fun PhotosTab(
 ) {
     var q by remember { mutableStateOf("") }
     var folder by remember { mutableStateOf<String?>(null) }
+    var cols by remember { mutableIntStateOf(3) }
     val fg = LocalContentColor.current
     val buckets = remember(all) { all.groupingBy { it.bucket }.eachCount().entries.sortedByDescending { it.value }.map { it.key } }
     val shown = remember(all, q, folder, favs) {
@@ -263,7 +317,11 @@ private fun PhotosTab(
         }
     }
     Column(Modifier.statusBarsPadding()) {
-        Header("All Images", "${shown.size}")
+        Header("All Images", "${shown.size}") {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Chip("−") { cols = (cols + 1).coerceAtMost(6) }; Chip("+") { cols = (cols - 1).coerceAtLeast(2) }
+            }
+        }
         BasicTextField(
             q, { q = it }, singleLine = true,
             textStyle = TStyle(color = fg, fontSize = 15.sp), cursorBrush = SolidColor(fg),
@@ -277,17 +335,17 @@ private fun PhotosTab(
             item { Chip("★ Favorites", folder == "★") { folder = "★" } }
             items(buckets) { b -> Chip(b, folder == b) { folder = b } }
         }
-        PhotoGrid(shown, selected, { onTap(shown, it) }, { onLong(shown[it]) }, Modifier.weight(1f))
+        PhotoGrid(shown, selected, { onTap(shown, it) }, { onLong(shown[it]) }, Modifier.weight(1f), cols = cols)
     }
 }
 
 @Composable
-private fun PhotoGrid(
+internal fun PhotoGrid(
     ps: List<Photo>, selected: Set<Uri>, onTap: (Int) -> Unit, onLong: (Int) -> Unit,
-    modifier: Modifier = Modifier, header: (@Composable () -> Unit)? = null,
+    modifier: Modifier = Modifier, header: (@Composable () -> Unit)? = null, cols: Int = 3,
 ) {
     LazyVerticalGrid(
-        GridCells.Fixed(3), modifier,
+        GridCells.Fixed(cols), modifier,
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 120.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -389,14 +447,24 @@ private fun ZoomImage(uri: Uri, onTap: () -> Unit) {
 @Composable
 private fun Viewer(
     ps: List<Photo>, start: Int, favs: Set<String>,
-    onFav: (Photo) -> Unit, onShare: (Photo) -> Unit, onDelete: (Photo) -> Unit, onClose: () -> Unit,
+    onFav: (Photo) -> Unit, onShare: (Photo) -> Unit, onSmall: (Photo) -> Unit, onEdit: (Photo) -> Unit,
+    onDelete: (Photo) -> Unit, onClose: () -> Unit,
 ) {
     val pager = rememberPagerState(start) { ps.size }
     var chrome by remember { mutableStateOf(true) }
+    var info by remember { mutableStateOf(false) }
+    var playing by remember { mutableStateOf(false) }
+    LaunchedEffect(playing) {
+        while (playing) {
+            delay(3000)
+            if (pager.currentPage < ps.size - 1) pager.animateScrollToPage(pager.currentPage + 1) else playing = false
+        }
+    }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1) { i ->
             ZoomImage(ps[i].uri) { chrome = !chrome }
         }
+        if (info) InfoCard(ps[pager.currentPage], Modifier.align(Alignment.BottomCenter).padding(bottom = 90.dp)) { info = false }
         if (chrome) {
             val p = ps[pager.currentPage]
             val isFav = p.uri.toString() in favs
@@ -415,8 +483,11 @@ private fun Viewer(
                 Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp)
                     .clip(CircleShape).background(Color.White.copy(0.18f)).padding(6.dp),
             ) {
-                listOf("Share" to { onShare(p) }, "Delete" to { onDelete(p) }).forEach { (l, a) ->
-                    Text(l, color = Color.White, fontSize = 14.sp, modifier = Modifier.clip(CircleShape).clickable { a() }.padding(horizontal = 22.dp, vertical = 10.dp))
+                listOf(
+                    "Share" to { onShare(p) }, "Small" to { onSmall(p) }, "Edit" to { onEdit(p) }, "Info" to { info = !info },
+                    (if (playing) "⏸" else "▶") to { playing = !playing }, "Trash" to { onDelete(p) },
+                ).forEach { (l, a) ->
+                    Text(l, color = Color.White, fontSize = 13.sp, modifier = Modifier.clip(CircleShape).clickable { a() }.padding(horizontal = 11.dp, vertical = 10.dp))
                 }
             }
         }
