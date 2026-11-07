@@ -26,9 +26,8 @@ data class Photo(val uri: Uri, val millis: Long, val size: Long) {
 
 fun loadPhotos(ctx: Context): List<Photo> {
     val base = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-    val m = MediaStore.Images.Media
     val out = ArrayList<Photo>()
-    ctx.contentResolver.query(base, arrayOf(m._ID, m.DATE_TAKEN, m.DATE_ADDED, m.SIZE), null, null, null)?.use { c ->
+    ctx.contentResolver.query(base, arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DATE_TAKEN, MediaStore.Images.Media.DATE_ADDED, MediaStore.Images.Media.SIZE), null, null, null)?.use { c ->
         while (c.moveToNext()) {
             val taken = c.getLong(1)
             val millis = if (taken > 0) taken else c.getLong(2) * 1000
